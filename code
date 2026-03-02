@@ -1,0 +1,258 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.datasets import fetch_openml
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import OneHotEncoder
+
+# ==============================
+# Helper Functions
+# ==============================
+
+def relu(Z):
+    return np.maximum(0, Z)
+
+def relu_derivative(Z):
+    return (Z > 0).astype(float)
+
+def softmax(Z):
+    expZ = np.exp(Z - np.max(Z, axis=1, keepdims=True))
+    return expZ / np.sum(expZ, axis=1, keepdims=True)
+
+def cross_entropy_loss(y_true, y_pred):
+    m = y_true.shape[0]
+    return -np.sum(y_true * np.log(y_pred + 1e-8)) / m
+
+def accuracy(y_true, y_pred):
+    return np.mean(np.argmax(y_true, axis=1) == np.argmax(y_pred, axis=1))
+
+
+# ==============================
+# Neural Network
+# ==============================
+
+class NeuralNetwork:
+    def __init__(self, input_size, hidden_size, output_size):
+
+        # He Initialization
+        self.W1 = np.random.randn(input_size, hidden_size) * np.sqrt(2. / input_size)
+        self.b1 = np.zeros((1, hidden_size))
+
+        self.W2 = np.random.randn(hidden_size, output_size) * np.sqrt(2. / hidden_size)
+        self.b2 = np.zeros((1, output_size))
+
+    def forward(self, X):
+        self.Z1 = X @ self.W1 + self.b1
+        self.A1 = relu(self.Z1)
+
+        self.Z2 = self.A1 @ self.W2 + self.b2
+        self.A2 = softmax(self.Z2)
+
+        return self.A2
+
+    def backward(self, X, Y):
+        m = X.shape[0]
+
+        dZ2 = self.A2 - Y
+        self.dW2 = self.A1.T @ dZ2 / m
+        self.db2 = np.sum(dZ2, axis=0, keepdims=True) / m
+
+        dZ1 = (dZ2 @ self.W2.T) * relu_derivative(self.Z1)
+        self.dW1 = X.T @ dZ1 / m
+        self.db1 = np.sum(dZ1, axis=0, keepdims=True) / m
+
+
+# ==============================
+# Optimizers
+# ==============================
+
+class SGD:
+    def __init__(self, lr=0.05):
+        self.lr = lr
+
+    def update(self, model):
+        model.W1 -= self.lr * model.dW1
+        model.b1 -= self.lr * model.db1
+        model.W2 -= self.lr * model.dW2
+        model.b2 -= self.lr * model.db2
+
+
+class Momentum:
+    def __init__(self, lr=0.05, beta=0.9):
+        self.lr = lr
+        self.beta = beta
+        self.v = {}
+
+    def update(self, model):
+        if not self.v:
+            self.v["W1"] = np.zeros_like(model.W1)
+            self.v["b1"] = np.zeros_like(model.b1)
+            self.v["W2"] = np.zeros_like(model.W2)
+            self.v["b2"] = np.zeros_like(model.b2)
+
+        for param in ["W1", "b1", "W2", "b2"]:
+            grad = getattr(model, "d" + param)
+            self.v[param] = self.beta * self.v[param] + (1 - self.beta) * grad
+            setattr(model, param, getattr(model, param) - self.lr * self.v[param])
+
+
+class Adam:
+    def __init__(self, lr=0.001, beta1=0.9, beta2=0.999, epsilon=1e-8):
+        self.lr = lr
+        self.beta1 = beta1
+        self.beta2 = beta2
+        self.epsilon = epsilon
+        self.m = {}
+        self.v = {}
+        self.t = 0
+
+    def update(self, model):
+        if not self.m:
+            for param in ["W1", "b1", "W2", "b2"]:
+                self.m[param] = np.zeros_like(getattr(model, param))
+                self.v[param] = np.zeros_like(getattr(model, param))
+
+        self.t += 1
+
+        for param in ["W1", "b1", "W2", "b2"]:
+            grad = getattr(model, "d" + param)
+
+            self.m[param] = self.beta1 * self.m[param] + (1 - self.beta1) * grad
+            self.v[param] = self.beta2 * self.v[param] + (1 - self.beta2) * (grad ** 2)
+
+            m_hat = self.m[param] / (1 - self.beta1 ** self.t)
+            v_hat = self.v[param] / (1 - self.beta2 ** self.t)
+
+            update_value = self.lr * m_hat / (np.sqrt(v_hat) + self.epsilon)
+            setattr(model, param, getattr(model, param) - update_value)
+
+
+# ==============================
+# Training Function (Mini-batch)
+# ==============================
+
+def train(model, optimizer, X_train, y_train, X_test, y_test,
+          epochs=20, batch_size=64):
+
+    train_losses = []
+    train_accs = []
+    test_accs = []
+
+    n = X_train.shape[0]
+
+    for epoch in range(epochs):
+
+        indices = np.random.permutation(n)
+        X_train = X_train[indices]
+        y_train = y_train[indices]
+
+        for i in range(0, n, batch_size):
+            X_batch = X_train[i:i+batch_size]
+            y_batch = y_train[i:i+batch_size]
+
+            y_pred = model.forward(X_batch)
+            model.backward(X_batch, y_batch)
+            optimizer.update(model)
+
+        # Evaluate training
+        train_pred = model.forward(X_train)
+        train_loss = cross_entropy_loss(y_train, train_pred)
+        train_acc = accuracy(y_train, train_pred)
+
+        # Evaluate testing
+        test_pred = model.forward(X_test)
+        test_acc = accuracy(y_test, test_pred)
+
+        train_losses.append(train_loss)
+        train_accs.append(train_acc)
+        test_accs.append(test_acc)
+
+        print(f"Epoch {epoch+1}/{epochs} | "
+              f"Loss: {train_loss:.4f} | "
+              f"Train Acc: {train_acc:.4f} | "
+              f"Test Acc: {test_acc:.4f}")
+
+    return train_losses, train_accs, test_accs
+
+
+# ==============================
+# Load Dataset
+# ==============================
+
+print("Loading MNIST...")
+mnist = fetch_openml('mnist_784', version=1)
+
+X = mnist.data.astype(np.float32) / 255.0
+y = mnist.target.astype(np.int64)
+
+# Use subset for speed
+X = X[:10000]
+y = y[:10000]
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42
+)
+
+encoder = OneHotEncoder(sparse_output=False)
+y_train = encoder.fit_transform(y_train.reshape(-1, 1))
+y_test = encoder.transform(y_test.reshape(-1, 1))
+
+
+# ==============================
+# Run Experiments
+# ==============================
+
+input_size = 784
+hidden_size = 128
+output_size = 10
+
+# SGD
+print("\nTraining with SGD")
+model_sgd = NeuralNetwork(input_size, hidden_size, output_size)
+sgd = SGD(lr=0.05)
+loss_sgd, acc_sgd, test_sgd = train(
+    model_sgd, sgd, X_train, y_train, X_test, y_test)
+
+# Momentum
+print("\nTraining with Momentum")
+model_mom = NeuralNetwork(input_size, hidden_size, output_size)
+mom = Momentum(lr=0.05)
+loss_mom, acc_mom, test_mom = train(
+    model_mom, mom, X_train, y_train, X_test, y_test)
+
+# Adam
+print("\nTraining with Adam")
+model_adam = NeuralNetwork(input_size, hidden_size, output_size)
+adam = Adam(lr=0.001)
+loss_adam, acc_adam, test_adam = train(
+    model_adam, adam, X_train, y_train, X_test, y_test)
+
+
+# ==============================
+# Plot Results
+# ==============================
+
+plt.figure()
+plt.plot(loss_sgd, label="SGD")
+plt.plot(loss_mom, label="Momentum")
+plt.plot(loss_adam, label="Adam")
+plt.title("Loss vs Epoch")
+plt.xlabel("Epoch")
+plt.ylabel("Loss")
+plt.legend()
+plt.show()
+
+plt.figure()
+plt.plot(test_sgd, label="SGD")
+plt.plot(test_mom, label="Momentum")
+plt.plot(test_adam, label="Adam")
+plt.title("Test Accuracy vs Epoch")
+plt.xlabel("Epoch")
+plt.ylabel("Accuracy")
+plt.legend()
+plt.show()
+
+
+print("\nFinal Test Accuracies:")
+print("SGD:", test_sgd[-1])
+print("Momentum:", test_mom[-1])
+print("Adam:", test_adam[-1])
